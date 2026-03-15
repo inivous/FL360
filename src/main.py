@@ -1368,6 +1368,85 @@ def cancel_async_tasks():
 
 
 
+@app.route('/api/route', methods=['POST'])
+def get_route():
+    """
+    Proxy to Geoapify Routing API for realistic road-based routing.
+    Provides turn-by-turn directions with road types for speed limit estimation.
+    """
+    try:
+        data = request.json
+        start = data.get('start')  # [lat, lng]
+        end = data.get('end')  # [lat, lng]
+        mode = data.get('mode', 'drive')  # drive, walk, bicycle
+        api_key = data.get('api_key', '')
+        
+        if not start or not end:
+            return jsonify({'error': 'Start and end coordinates required'}), 400
+        
+        # Geoapify expects lng,lat format
+        waypoints = f"{start[1]},{start[0]}|{end[1]},{end[0]}"
+        
+        # Build Geoapify Routing API URL
+        url = f"https://api.geoapify.com/v1/routing?waypoints={waypoints}&mode={mode}&details=instruction_details,route_details&apiKey={api_key}"
+        
+        response = requests.get(url, timeout=30)
+        
+        if response.status_code == 200:
+            route_data = response.json()
+            return jsonify(route_data)
+        else:
+            return jsonify({'error': f'Routing API error: {response.status_code}'}), response.status_code
+            
+    except Exception as e:
+        logger.error(f"Error getting route: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/traffic_signals', methods=['POST'])
+def get_traffic_signals():
+    """
+    Query OpenStreetMap Overpass API for traffic signals along a route.
+    Returns traffic signal locations for realistic stop simulation.
+    """
+    try:
+        data = request.json
+        bounds = data.get('bounds')  # [south, west, north, east]
+        
+        if not bounds:
+            return jsonify({'error': 'Bounds required'}), 400
+        
+        # Overpass API query for traffic signals
+        overpass_url = "https://overpass-api.de/api/interpreter"
+        query = f"""
+        [out:json][timeout:25];
+        (
+          node["highway"="traffic_signals"]({bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]});
+          node["highway"="stop"]({bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]});
+        );
+        out body;
+        """
+        
+        response = requests.post(overpass_url, data={'data': query}, timeout=30)
+        
+        if response.status_code == 200:
+            osm_data = response.json()
+            signals = []
+            for element in osm_data.get('elements', []):
+                signals.append({
+                    'lat': element.get('lat'),
+                    'lng': element.get('lon'),
+                    'type': element.get('tags', {}).get('highway', 'traffic_signals')
+                })
+            return jsonify({'signals': signals})
+        else:
+            return jsonify({'error': f'Overpass API error: {response.status_code}'}), response.status_code
+            
+    except Exception as e:
+        logger.error(f"Error getting traffic signals: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/exit', methods=['POST'])
 def exit_app():
     logger.warning("Exit GeoPort")

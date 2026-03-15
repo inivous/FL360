@@ -1207,57 +1207,329 @@ L.leafletMenu = function(a, b) {
         }).join('');
     }
 
-    // ============ ROUTE SIMULATION ============
+    // ============ REALISTIC ROUTE SIMULATION FOR NAPLES, FL ============
+    // Uses Geoapify for real road routing with speed limits
+    
     let routeSimulation = {
         active: false,
         paused: false,
         currentIndex: 0,
-        waypoints: [],
-        speed: 'walk',
-        speedVariation: true,
+        waypoints: [],           // Detailed route points
+        routeSegments: [],       // Segments with speed limit info
+        trafficSignals: [],      // Traffic signal locations
+        currentSpeedLimit: 25,   // Current speed limit in mph
+        mode: 'drive',           // drive, walk, bicycle
         interval: null,
-        marker: null
+        routePolyline: null,
+        apiKey: localStorage.getItem('geoapify_api_key') || ''
     };
 
-    const SPEEDS = {
-        walk: { base: 5, min: 3, max: 6, label: 'Walking', icon: 'fa-walking' },
-        bike: { base: 15, min: 10, max: 20, label: 'Biking', icon: 'fa-bicycle' },
-        drive: { base: 40, min: 25, max: 50, label: 'Driving', icon: 'fa-car' }
+    // Naples, FL typical speed limits by road type (in mph)
+    const FLORIDA_SPEED_LIMITS = {
+        // Highway/Interstate
+        'motorway': 70,
+        'motorway_link': 45,
+        'trunk': 55,
+        'trunk_link': 35,
+        // Major roads
+        'primary': 45,
+        'primary_link': 30,
+        'secondary': 40,
+        'secondary_link': 25,
+        // City streets
+        'tertiary': 35,
+        'tertiary_link': 25,
+        'residential': 25,
+        'living_street': 15,
+        'unclassified': 30,
+        // Special
+        'service': 15,
+        'track': 15,
+        'path': 5,
+        'footway': 3,
+        'cycleway': 15,
+        // Default for Naples area
+        'default': 35
     };
 
-    function setRouteSpeed(speed) {
-        routeSimulation.speed = speed;
+    // Walking/biking speeds (mph)
+    const MODE_SPEEDS = {
+        walk: { base: 3, min: 2.5, max: 3.5 },
+        bicycle: { base: 12, min: 8, max: 18 },
+        drive: { base: null, min: null, max: null } // Uses road speed limits
+    };
+
+    function setGeoapifyApiKey() {
+        const key = prompt('Enter your Geoapify API Key (get free at geoapify.com):', routeSimulation.apiKey);
+        if (key !== null) {
+            routeSimulation.apiKey = key;
+            localStorage.setItem('geoapify_api_key', key);
+            displayToast('API Key saved!');
+        }
+    }
+
+    function setRouteMode(mode) {
+        routeSimulation.mode = mode;
         document.querySelectorAll('.speed-option').forEach(el => {
-            el.classList.toggle('active', el.dataset.speed === speed);
+            el.classList.toggle('active', el.dataset.speed === mode);
         });
         updateRouteInfo();
     }
 
-    function getRandomSpeed(speedType) {
-        const config = SPEEDS[speedType];
-        if (routeSimulation.speedVariation) {
-            // Random speed within min-max range, staying under "limit"
-            return config.min + Math.random() * (config.max - config.min);
-        }
-        return config.base;
+    // Get speed limit for a road type (returns mph)
+    function getSpeedLimitForRoad(roadType) {
+        return FLORIDA_SPEED_LIMITS[roadType] || FLORIDA_SPEED_LIMITS['default'];
     }
 
-    function startRouteSimulation() {
-        if (lineLatLngs.length < 2) {
-            displayToast('Please draw a route first');
+    // Convert mph to km/h
+    function mphToKmh(mph) {
+        return mph * 1.60934;
+    }
+
+    // Get realistic speed with variation (stays under limit)
+    function getRealisticSpeed(speedLimitMph, mode) {
+        if (mode === 'walk') {
+            const config = MODE_SPEEDS.walk;
+            return mphToKmh(config.min + Math.random() * (config.max - config.min));
+        }
+        if (mode === 'bicycle') {
+            const config = MODE_SPEEDS.bicycle;
+            return mphToKmh(config.min + Math.random() * (config.max - config.min));
+        }
+        // For driving: stay 0-5 mph under the limit with some variation
+        const variation = Math.random() * 5;
+        const actualSpeed = Math.max(speedLimitMph - variation, speedLimitMph * 0.85);
+        return mphToKmh(actualSpeed);
+    }
+
+    // Check if a point is near a traffic signal
+    function isNearTrafficSignal(lat, lng, signals, threshold = 0.0003) {
+        for (const signal of signals) {
+            const dist = Math.sqrt(
+                Math.pow(lat - signal.lat, 2) + Math.pow(lng - signal.lng, 2)
+            );
+            if (dist < threshold) {
+                return signal;
+            }
+        }
+        return null;
+    }
+
+    // Calculate route using Geoapify API
+    async function calculateRealisticRoute(startPoint, endPoint) {
+        if (!routeSimulation.apiKey) {
+            displayToast('Please set your Geoapify API key first');
+            setGeoapifyApiKey();
+            return null;
+        }
+
+        const loadingToast = displayToast('Calculating route...');
+        
+        try {
+            const response = await fetch('/api/route', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    start: startPoint,
+                    end: endPoint,
+                    mode: routeSimulation.mode,
+                    api_key: routeSimulation.apiKey
+                })
+            });
+
+            const data = await response.json();
+            
+            if (data.error) {
+                displayToast(`Route error: ${data.error}`);
+                return null;
+            }
+
+            if (!data.features || data.features.length === 0) {
+                displayToast('No route found');
+                return null;
+            }
+
+            const route = data.features[0];
+            const geometry = route.geometry;
+            const properties = route.properties;
+
+            // Extract detailed waypoints from route geometry
+            let waypoints = [];
+            let segments = [];
+
+            if (geometry.type === 'LineString') {
+                waypoints = geometry.coordinates.map(coord => [coord[1], coord[0]]);
+            } else if (geometry.type === 'MultiLineString') {
+                geometry.coordinates.forEach(line => {
+                    line.forEach(coord => {
+                        waypoints.push([coord[1], coord[0]]);
+                    });
+                });
+            }
+
+            // Extract leg information for speed limits
+            if (properties.legs) {
+                properties.legs.forEach(leg => {
+                    if (leg.steps) {
+                        leg.steps.forEach(step => {
+                            segments.push({
+                                roadType: step.road_type || 'default',
+                                distance: step.distance,
+                                instruction: step.instruction?.text || '',
+                                speedLimit: getSpeedLimitForRoad(step.road_type || 'default')
+                            });
+                        });
+                    }
+                });
+            }
+
+            // Get traffic signals along the route
+            const bounds = calculateBounds(waypoints);
+            let signals = [];
+            
+            try {
+                const signalResponse = await fetch('/api/traffic_signals', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ bounds })
+                });
+                const signalData = await signalResponse.json();
+                signals = signalData.signals || [];
+            } catch (e) {
+                console.log('Could not fetch traffic signals:', e);
+            }
+
+            displayToast(`Route calculated: ${(properties.distance / 1000).toFixed(2)} km, ${Math.round(properties.time / 60)} min`);
+
+            return {
+                waypoints,
+                segments,
+                signals,
+                totalDistance: properties.distance,
+                estimatedTime: properties.time
+            };
+
+        } catch (error) {
+            console.error('Route calculation error:', error);
+            displayToast('Error calculating route');
+            return null;
+        }
+    }
+
+    // Calculate bounds for a set of waypoints
+    function calculateBounds(waypoints) {
+        let south = 90, west = 180, north = -90, east = -180;
+        waypoints.forEach(([lat, lng]) => {
+            south = Math.min(south, lat);
+            north = Math.max(north, lat);
+            west = Math.min(west, lng);
+            east = Math.max(east, lng);
+        });
+        // Add small padding
+        const pad = 0.01;
+        return [south - pad, west - pad, north + pad, east + pad];
+    }
+
+    // Draw route on map using click to set start/end
+    let routeStartPoint = null;
+    let routeEndPoint = null;
+    let routeStartMarker = null;
+    let routeEndMarker = null;
+
+    function enableRouteDrawing() {
+        routeStartPoint = null;
+        routeEndPoint = null;
+        if (routeStartMarker) map.removeLayer(routeStartMarker);
+        if (routeEndMarker) map.removeLayer(routeEndMarker);
+        if (routeSimulation.routePolyline) map.removeLayer(routeSimulation.routePolyline);
+        
+        displayToast('Click on the map to set route START point');
+        map.once('click', handleRouteStartClick);
+    }
+
+    function handleRouteStartClick(e) {
+        routeStartPoint = [e.latlng.lat, e.latlng.lng];
+        routeStartMarker = L.marker(e.latlng, {
+            icon: L.divIcon({
+                className: 'route-marker-start',
+                html: '<div style="background: #10b981; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 5px rgba(0,0,0,0.3);"></div>',
+                iconSize: [20, 20],
+                iconAnchor: [10, 10]
+            })
+        }).addTo(map);
+        
+        displayToast('Click on the map to set route END point');
+        map.once('click', handleRouteEndClick);
+    }
+
+    async function handleRouteEndClick(e) {
+        routeEndPoint = [e.latlng.lat, e.latlng.lng];
+        routeEndMarker = L.marker(e.latlng, {
+            icon: L.divIcon({
+                className: 'route-marker-end',
+                html: '<div style="background: #ef4444; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 5px rgba(0,0,0,0.3);"></div>',
+                iconSize: [20, 20],
+                iconAnchor: [10, 10]
+            })
+        }).addTo(map);
+
+        // Calculate realistic route
+        const routeData = await calculateRealisticRoute(routeStartPoint, routeEndPoint);
+        
+        if (routeData) {
+            // Store route data
+            routeSimulation.waypoints = routeData.waypoints;
+            routeSimulation.routeSegments = routeData.segments;
+            routeSimulation.trafficSignals = routeData.signals;
+            lineLatLngs = routeData.waypoints;
+
+            // Draw route polyline
+            if (routeSimulation.routePolyline) {
+                map.removeLayer(routeSimulation.routePolyline);
+            }
+            routeSimulation.routePolyline = L.polyline(routeData.waypoints, {
+                color: '#3b82f6',
+                weight: 5,
+                opacity: 0.8
+            }).addTo(map);
+
+            // Draw traffic signals
+            routeData.signals.forEach(signal => {
+                L.circleMarker([signal.lat, signal.lng], {
+                    radius: 6,
+                    fillColor: signal.type === 'stop' ? '#ef4444' : '#f59e0b',
+                    color: '#fff',
+                    weight: 2,
+                    fillOpacity: 0.9
+                }).addTo(drawnItems).bindPopup(signal.type === 'stop' ? 'Stop Sign' : 'Traffic Light');
+            });
+
+            // Fit map to route
+            map.fitBounds(routeSimulation.routePolyline.getBounds(), { padding: [50, 50] });
+            
+            updateRouteInfo();
+            displayToast(`Route ready: ${routeData.signals.length} traffic controls detected`);
+        }
+    }
+
+    async function startRouteSimulation() {
+        if (routeSimulation.waypoints.length < 2) {
+            displayToast('Please create a route first using "Plan Route"');
             return;
         }
 
         routeSimulation.active = true;
         routeSimulation.paused = false;
         routeSimulation.currentIndex = 0;
-        routeSimulation.waypoints = [...lineLatLngs];
 
         document.getElementById('route-start-btn').style.display = 'none';
         document.getElementById('route-pause-btn').style.display = 'flex';
         document.getElementById('route-stop-btn').style.display = 'flex';
 
-        processRoutePoint();
+        // Update speed display
+        updateSpeedDisplay(0, routeSimulation.currentSpeedLimit);
+        
+        processRoutePointRealistic();
     }
 
     function pauseRouteSimulation() {
@@ -1268,7 +1540,7 @@ L.leafletMenu = function(a, b) {
             clearTimeout(routeSimulation.interval);
         } else {
             btn.innerHTML = '<i class="fas fa-pause"></i> Pause';
-            processRoutePoint();
+            processRoutePointRealistic();
         }
     }
 
@@ -1284,10 +1556,12 @@ L.leafletMenu = function(a, b) {
         document.getElementById('route-pause-btn').innerHTML = '<i class="fas fa-pause"></i> Pause';
 
         updateRouteProgress(0);
+        updateSpeedDisplay(0, 0);
     }
 
-    function processRoutePoint() {
+    async function processRoutePointRealistic() {
         if (!routeSimulation.active || routeSimulation.paused) return;
+        
         if (routeSimulation.currentIndex >= routeSimulation.waypoints.length) {
             stopRouteSimulation();
             displayToast('Route completed!');
@@ -1299,19 +1573,60 @@ L.leafletMenu = function(a, b) {
         // Update map marker
         if (marker) {
             marker.setLatLng([lat, lng]);
+        } else {
+            marker = createMarker(L.latLng(lat, lng));
         }
         setCoordinates(lat, lng);
         
         // Send location to device
         setLocationArrows();
 
-        // Calculate time to next point
-        let timeToNext = 1000; // Default 1 second
+        // Check for traffic signal
+        const nearSignal = isNearTrafficSignal(lat, lng, routeSimulation.trafficSignals);
+        let signalDelay = 0;
+        
+        if (nearSignal) {
+            if (nearSignal.type === 'stop') {
+                // Stop sign: 2-4 second stop
+                signalDelay = 2000 + Math.random() * 2000;
+                updateSpeedDisplay(0, routeSimulation.currentSpeedLimit);
+                document.getElementById('route-status').textContent = 'Stopped at stop sign';
+            } else {
+                // Traffic light: 50% chance of red light, 5-30 second wait
+                if (Math.random() < 0.5) {
+                    signalDelay = 5000 + Math.random() * 25000;
+                    updateSpeedDisplay(0, routeSimulation.currentSpeedLimit);
+                    document.getElementById('route-status').textContent = 'Waiting at red light';
+                }
+            }
+            // Remove this signal so we don't stop again
+            routeSimulation.trafficSignals = routeSimulation.trafficSignals.filter(s => s !== nearSignal);
+        }
+
+        // Calculate time to next point based on speed limit
+        let timeToNext = 1000;
         if (routeSimulation.currentIndex < routeSimulation.waypoints.length - 1) {
             const nextPoint = routeSimulation.waypoints[routeSimulation.currentIndex + 1];
             const distance = calculateDistance(lat, lng, nextPoint[0], nextPoint[1]);
-            const speed = getRandomSpeed(routeSimulation.speed);
-            timeToNext = (distance / speed) * 3600 * 1000; // Convert to milliseconds
+            
+            // Get speed limit from segment info
+            const segmentIndex = Math.min(
+                Math.floor(routeSimulation.currentIndex / (routeSimulation.waypoints.length / Math.max(routeSimulation.routeSegments.length, 1))),
+                routeSimulation.routeSegments.length - 1
+            );
+            
+            if (routeSimulation.routeSegments.length > 0 && segmentIndex >= 0) {
+                routeSimulation.currentSpeedLimit = routeSimulation.routeSegments[segmentIndex].speedLimit;
+            }
+            
+            const speed = getRealisticSpeed(routeSimulation.currentSpeedLimit, routeSimulation.mode);
+            timeToNext = (distance / speed) * 3600 * 1000;
+            
+            // Update speed display (convert km/h to mph for display)
+            const currentSpeedMph = speed / 1.60934;
+            updateSpeedDisplay(Math.round(currentSpeedMph), routeSimulation.currentSpeedLimit);
+            document.getElementById('route-status').textContent = 
+                routeSimulation.routeSegments[segmentIndex]?.instruction || 'En route';
         }
 
         // Update progress
@@ -1323,7 +1638,17 @@ L.leafletMenu = function(a, b) {
             `${routeSimulation.currentIndex + 1} / ${routeSimulation.waypoints.length}`;
 
         routeSimulation.currentIndex++;
-        routeSimulation.interval = setTimeout(processRoutePoint, Math.max(timeToNext, 500));
+        
+        // Add signal delay if stopped
+        const totalDelay = Math.max(timeToNext, 200) + signalDelay;
+        routeSimulation.interval = setTimeout(processRoutePointRealistic, totalDelay);
+    }
+
+    function updateSpeedDisplay(currentSpeed, limitSpeed) {
+        const speedEl = document.getElementById('current-speed');
+        const limitEl = document.getElementById('speed-limit');
+        if (speedEl) speedEl.textContent = `${currentSpeed} mph`;
+        if (limitEl) limitEl.textContent = `${limitSpeed} mph`;
     }
 
     function updateRouteProgress(percent) {
@@ -1337,26 +1662,60 @@ L.leafletMenu = function(a, b) {
         const distanceEl = document.getElementById('route-distance');
         const etaEl = document.getElementById('route-eta');
         
-        if (lineLatLngs.length < 2) {
-            if (distanceEl) distanceEl.textContent = '0 km';
+        if (routeSimulation.waypoints.length < 2) {
+            if (distanceEl) distanceEl.textContent = '0 mi';
             if (etaEl) etaEl.textContent = '0 min';
             return;
         }
 
         let totalDistance = 0;
-        for (let i = 0; i < lineLatLngs.length - 1; i++) {
+        for (let i = 0; i < routeSimulation.waypoints.length - 1; i++) {
             totalDistance += calculateDistance(
-                lineLatLngs[i][0], lineLatLngs[i][1],
-                lineLatLngs[i+1][0], lineLatLngs[i+1][1]
+                routeSimulation.waypoints[i][0], routeSimulation.waypoints[i][1],
+                routeSimulation.waypoints[i+1][0], routeSimulation.waypoints[i+1][1]
             );
         }
 
-        const speed = SPEEDS[routeSimulation.speed].base;
-        const timeHours = totalDistance / speed;
+        // Calculate ETA based on mode and average speed
+        let avgSpeedMph;
+        if (routeSimulation.mode === 'walk') {
+            avgSpeedMph = 3;
+        } else if (routeSimulation.mode === 'bicycle') {
+            avgSpeedMph = 12;
+        } else {
+            // Average driving speed considering stops
+            avgSpeedMph = 25;
+        }
+        
+        const distanceMiles = totalDistance * 0.621371;
+        const timeHours = distanceMiles / avgSpeedMph;
         const timeMinutes = Math.round(timeHours * 60);
 
-        if (distanceEl) distanceEl.textContent = `${totalDistance.toFixed(2)} km`;
+        if (distanceEl) distanceEl.textContent = `${distanceMiles.toFixed(2)} mi`;
         if (etaEl) etaEl.textContent = `${timeMinutes} min`;
+    }
+
+    function clearRoute() {
+        // Clear route markers
+        if (routeStartMarker) map.removeLayer(routeStartMarker);
+        if (routeEndMarker) map.removeLayer(routeEndMarker);
+        if (routeSimulation.routePolyline) map.removeLayer(routeSimulation.routePolyline);
+        
+        // Clear drawn items (traffic signals, etc.)
+        drawnItems.clearLayers();
+        
+        // Reset state
+        routeStartPoint = null;
+        routeEndPoint = null;
+        routeSimulation.waypoints = [];
+        routeSimulation.routeSegments = [];
+        routeSimulation.trafficSignals = [];
+        lineLatLngs = [];
+        
+        updateRouteInfo();
+        updateSpeedDisplay(0, 0);
+        document.getElementById('route-status').textContent = 'Ready';
+        displayToast('Route cleared');
     }
 
     // ============ DARK MODE ============
