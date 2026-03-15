@@ -1261,9 +1261,10 @@ L.leafletMenu = function(a, b) {
 
     function setGeoapifyApiKey() {
         const key = prompt('Enter your Geoapify API Key (get free at geoapify.com):', routeSimulation.apiKey);
-        if (key !== null) {
-            routeSimulation.apiKey = key;
-            localStorage.setItem('geoapify_api_key', key);
+        if (key !== null && key.trim() !== '') {
+            routeSimulation.apiKey = key.trim();
+            localStorage.setItem('geoapify_api_key', key.trim());
+            updateApiKeyStatus();
             displayToast('API Key saved!');
         }
     }
@@ -2884,9 +2885,27 @@ document.addEventListener('DOMContentLoaded', function () {
     renderBookmarks();
     renderHistory();
     
-    // Set default route speed
-    setRouteSpeed('walk');
+    // Set default route mode to drive (for realistic FL routing)
+    setRouteMode('drive');
+    
+    // Check API key status
+    updateApiKeyStatus();
 });
+
+function updateApiKeyStatus() {
+    const apiKey = localStorage.getItem('geoapify_api_key');
+    const statusIcon = document.getElementById('api-status-icon');
+    const statusText = document.getElementById('api-status-text');
+    
+    if (apiKey && apiKey.length > 10) {
+        statusIcon.style.color = '#10b981';
+        statusText.textContent = 'API key configured';
+        routeSimulation.apiKey = apiKey;
+    } else {
+        statusIcon.style.color = '#ef4444';
+        statusText.textContent = 'No API key set';
+    }
+}
 </script>
 <script>
     const socket = io();
@@ -3029,6 +3048,28 @@ document.addEventListener('DOMContentLoaded', function () {
 
         <!-- Right Sidebar -->
         <div class="sidebar-right">
+            <!-- API Setup Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <h3><i class="fas fa-key"></i> Routing API</h3>
+                    <button class="btn btn-icon btn-secondary" onclick="setGeoapifyApiKey()" title="Set API Key">
+                        <i class="fas fa-cog"></i>
+                    </button>
+                </div>
+                <div class="panel-content">
+                    <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px;">
+                        Geoapify provides realistic road routing with speed limits.
+                    </div>
+                    <div id="api-key-status" style="display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 6px; background: var(--bg-tertiary);">
+                        <i class="fas fa-circle" style="font-size: 8px; color: #ef4444;" id="api-status-icon"></i>
+                        <span style="font-size: 0.75rem;" id="api-status-text">No API key set</span>
+                    </div>
+                    <a href="https://myprojects.geoapify.com/register" target="_blank" class="btn btn-secondary" style="width: 100%; margin-top: 8px; font-size: 0.75rem;">
+                        <i class="fas fa-external-link-alt"></i> Get Free API Key
+                    </a>
+                </div>
+            </div>
+
             <!-- Route Simulation Panel -->
             <div class="panel">
                 <div class="panel-header">
@@ -3036,30 +3077,58 @@ document.addEventListener('DOMContentLoaded', function () {
                 </div>
                 <div class="route-simulation">
                     <div class="route-controls">
-                        <!-- Speed Selection -->
+                        <!-- Mode Selection -->
                         <div class="speed-selector">
-                            <div class="speed-option active" data-speed="walk" onclick="setRouteSpeed('walk')">
+                            <div class="speed-option" data-speed="walk" onclick="setRouteMode('walk')">
                                 <i class="fas fa-walking"></i>
                                 <span class="speed-label">Walk</span>
-                                <span class="speed-value">3-6 km/h</span>
+                                <span class="speed-value">~3 mph</span>
                             </div>
-                            <div class="speed-option" data-speed="bike" onclick="setRouteSpeed('bike')">
+                            <div class="speed-option" data-speed="bicycle" onclick="setRouteMode('bicycle')">
                                 <i class="fas fa-bicycle"></i>
                                 <span class="speed-label">Bike</span>
-                                <span class="speed-value">10-20 km/h</span>
+                                <span class="speed-value">~12 mph</span>
                             </div>
-                            <div class="speed-option" data-speed="drive" onclick="setRouteSpeed('drive')">
+                            <div class="speed-option active" data-speed="drive" onclick="setRouteMode('drive')">
                                 <i class="fas fa-car"></i>
                                 <span class="speed-label">Drive</span>
-                                <span class="speed-value">25-50 km/h</span>
+                                <span class="speed-value">Speed Limit</span>
                             </div>
+                        </div>
+
+                        <!-- Route Planning -->
+                        <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                            <button class="btn btn-primary" onclick="enableRouteDrawing()" style="flex: 1;">
+                                <i class="fas fa-map-marked-alt"></i> Plan Route
+                            </button>
+                            <button class="btn btn-secondary" onclick="clearRoute()" style="flex: 1;">
+                                <i class="fas fa-trash"></i> Clear
+                            </button>
+                        </div>
+
+                        <!-- Speed Display -->
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">
+                            <div style="background: var(--bg-tertiary); padding: 12px; border-radius: 8px; text-align: center;">
+                                <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Current Speed</div>
+                                <div id="current-speed" style="font-size: 1.25rem; font-weight: 600; color: var(--accent);">0 mph</div>
+                            </div>
+                            <div style="background: var(--bg-tertiary); padding: 12px; border-radius: 8px; text-align: center;">
+                                <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Speed Limit</div>
+                                <div id="speed-limit" style="font-size: 1.25rem; font-weight: 600; color: var(--text-primary);">0 mph</div>
+                            </div>
+                        </div>
+
+                        <!-- Route Status -->
+                        <div style="background: var(--bg-tertiary); padding: 8px 12px; border-radius: 6px; margin-bottom: 12px;">
+                            <div style="font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 2px;">Status</div>
+                            <div id="route-status" style="font-size: 0.8rem; color: var(--text-primary);">Ready</div>
                         </div>
 
                         <!-- Route Info -->
                         <div class="route-info">
                             <div class="route-info-item">
                                 <label>Distance</label>
-                                <span id="route-distance">0 km</span>
+                                <span id="route-distance">0 mi</span>
                             </div>
                             <div class="route-info-item">
                                 <label>ETA</label>
@@ -3088,10 +3157,6 @@ document.addEventListener('DOMContentLoaded', function () {
                                 <i class="fas fa-stop"></i> Stop
                             </button>
                         </div>
-
-                        <button class="btn btn-secondary" onclick="clearPolylines()" style="width: 100%;">
-                            <i class="fas fa-trash"></i> Clear Route
-                        </button>
                     </div>
                 </div>
             </div>
@@ -3134,10 +3199,10 @@ document.addEventListener('DOMContentLoaded', function () {
                 </div>
                 <div class="panel-content">
                     <div style="font-size: 0.75rem; color: var(--text-muted); line-height: 1.6;">
+                        <p><strong>Plan Route</strong> - Click start then end point on map</p>
+                        <p><strong>Realistic driving</strong> - Uses FL speed limits & stops at lights</p>
                         <p><strong>Double-click</strong> on map to set location</p>
                         <p><strong>Arrow keys</strong> to nudge position</p>
-                        <p><strong>Draw tool</strong> to create custom routes</p>
-                        <p><strong>Right-click</strong> markers to edit</p>
                     </div>
                 </div>
             </div>
